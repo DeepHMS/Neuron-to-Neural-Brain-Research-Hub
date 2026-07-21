@@ -19,5 +19,5 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git remote add space https://YOUR_HF_USERNAME:$HF_TOKEN@huggingface.co/spaces/YOUR_HF_USERNAME/neuron-to-neural
+          git remote add space https://DeepBiswas:$HF_TOKEN@huggingface.co/spaces/DeepBiswas/neuron-to-neural
           git push --force space main
