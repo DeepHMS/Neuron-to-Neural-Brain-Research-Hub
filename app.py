@@ -262,7 +262,7 @@ async def serve_ui():
             
             <!-- User Form -->
             <div id="userAuthSection">
-                <form id="detailsForm" onsubmit="requestOTP(event)" class="space-y-4">
+                <form id="detailsForm" onsubmit="event.preventDefault(); requestOTP(event);" class="space-y-4">
                     <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Full Name *</label><input type="text" id="userName" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-indigo-500"></div>
                     <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Institution / Company *</label><input type="text" id="userInst" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-indigo-500"></div>
                     <div class="grid grid-cols-2 gap-3">
@@ -451,41 +451,66 @@ async def serve_ui():
         });
 
         function toggleAdminAuth(showAdmin) {
-            document.getElementById('userAuthSection').classList.toggle('hidden', showAdmin);
-            document.getElementById('adminAuthSection').classList.toggle('hidden', !showAdmin);
-            document.getElementById('tabAdminAuth').className = showAdmin ? 'text-xs text-amber-400 font-bold px-2 py-1 bg-amber-900/30 rounded border border-amber-500/30' : 'text-xs text-slate-400 font-bold px-2 py-1 rounded hover:text-white transition';
-            document.getElementById('tabUserAuth').className = !showAdmin ? 'text-xs text-indigo-400 font-bold px-2 py-1 bg-indigo-900/30 rounded border border-indigo-500/30' : 'text-xs text-slate-400 font-bold px-2 py-1 rounded hover:text-white transition';
+            const userSec = document.getElementById('userAuthSection');
+            const adminSec = document.getElementById('adminAuthSection');
+            const tabUser = document.getElementById('tabUserAuth');
+            const tabAdmin = document.getElementById('tabAdminAuth');
+
+            if (showAdmin) {
+                userSec.classList.add('hidden');
+                adminSec.classList.remove('hidden');
+                tabAdmin.className = 'text-xs text-amber-400 font-bold px-2 py-1 bg-amber-900/30 rounded border border-amber-500/30';
+                tabUser.className = 'text-xs text-slate-400 font-bold px-2 py-1 rounded hover:text-white transition';
+            } else {
+                userSec.classList.remove('hidden');
+                adminSec.classList.add('hidden');
+                tabAdmin.className = 'text-xs text-slate-400 font-bold px-2 py-1 rounded hover:text-white transition';
+                tabUser.className = 'text-xs text-indigo-400 font-bold px-2 py-1 bg-indigo-900/30 rounded border border-indigo-500/30';
+            }
         }
 
         async function requestOTP(e, isResend = false) {
             if(e) e.preventDefault();
-            if(!isResend) {
-                pendingUser = {
-                    name: document.getElementById('userName').value,
-                    institution: document.getElementById('userInst').value,
-                    country: document.getElementById('userCountry').value,
-                    email: document.getElementById('userEmail').value
-                };
-            }
             
-            const btn = document.getElementById('requestOtpBtn');
-            btn.innerText = "Sending Code..."; btn.disabled = true;
+            try {
+                if(!isResend) {
+                    pendingUser = {
+                        name: document.getElementById('userName').value,
+                        institution: document.getElementById('userInst').value,
+                        country: document.getElementById('userCountry').value,
+                        email: document.getElementById('userEmail').value
+                    };
+                }
+                
+                const btn = document.getElementById('requestOtpBtn');
+                btn.innerText = "Sending Code..."; 
+                btn.disabled = true;
 
-            await fetch('/api/send-otp', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: pendingUser.name, email: pendingUser.email })
-            });
+                const res = await fetch('/api/send-otp', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: pendingUser.name, email: pendingUser.email })
+                });
 
-            if(!isResend) {
-                document.getElementById('detailsForm').classList.add('hidden');
-                document.getElementById('otpForm').classList.remove('hidden');
-                document.getElementById('displayEmail').innerText = pendingUser.email;
-                startResendTimer();
-            } else {
-                alert("New code sent!");
+                if(!isResend) {
+                    document.getElementById('detailsForm').classList.add('hidden');
+                    document.getElementById('otpForm').classList.remove('hidden');
+                    document.getElementById('displayEmail').innerText = pendingUser.email;
+                    startResendTimer();
+                } else {
+                    alert("New code sent!");
+                }
+                
+                btn.innerText = "Request Access Code"; 
+                btn.disabled = false;
+                
+            } catch (error) {
+                console.error("OTP Request Failed:", error);
+                alert("Something went wrong. Please try again.");
+                const btn = document.getElementById('requestOtpBtn');
+                btn.innerText = "Request Access Code"; 
+                btn.disabled = false;
             }
-            btn.innerText = "Request Access Code"; btn.disabled = false;
         }
 
         function startResendTimer() {
@@ -816,9 +841,3 @@ async def serve_ui():
     </script>
 </body>
 </html>
-"""
-    return HTMLResponse(content=html_content)
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=7860)
