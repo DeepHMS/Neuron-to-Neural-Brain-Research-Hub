@@ -116,13 +116,11 @@ async def submit_data(data: SubmissionData):
     if client:
         try:
             sheet = client.open("Neuron2Neural_DB").worksheet("Pending_Submissions")
-            # Save payload as JSON string
             sheet.append_row([
                 req_id, timestamp, data.submitter_email, data.submitter_name, 
                 data.main_category, data.sub_category, json.dumps(data.payload)
             ])
             
-            # Send confirmation email
             body = f"Hello {data.submitter_name},\n\nThank you for submitting to the Neuron to Neural Hub.\nYour request number is: {req_id}.\n\nThe Admin will check the information, and you will receive a notification once it is approved and added to the platform."
             send_email_via_webhook(data.submitter_email, f"Submission Received [{req_id}]", body)
         except Exception as e:
@@ -156,7 +154,7 @@ async def process_admin_action(data: AdminAction):
         target_record = None
         for idx, row in enumerate(records):
             if str(row.get("req_id", row.get("ID", ""))) == data.req_id:
-                target_row_idx = idx + 2 # Offset for header and 0-index
+                target_row_idx = idx + 2 
                 target_record = row
                 break
                 
@@ -167,15 +165,12 @@ async def process_admin_action(data: AdminAction):
         payload_to_save = data.modified_payload if data.action == "approve_modified" else json.loads(target_record["payload"])
         
         if data.action in ["approve", "approve_modified"]:
-            # Route to correct sheet
             target_sheet_name = "Tools" if target_record["main_category"] == "NUE-Hub" else "NRI"
             target_sheet = db.worksheet(target_sheet_name)
             
-            # Flatten payload for Google sheet
             row_data = [datetime.now().strftime("%Y-%m-%d")] + list(payload_to_save.values())
             target_sheet.append_row(row_data)
             
-            # Send Approval Email
             body = f"Hello,\n\nYour submission [{data.req_id}] has been approved and added! Please check the Neuron to Neural (Bharat Brain Research Hub) platform to view your entry."
             send_email_via_webhook(submitter_email, f"Submission Approved [{data.req_id}]", body)
             
@@ -183,7 +178,6 @@ async def process_admin_action(data: AdminAction):
             body = f"Hello,\n\nUnfortunately, we have to decline your submission [{data.req_id}] as the inputs were not correct, all information was not added properly, or there was a mismatch. Please review and submit again."
             send_email_via_webhook(submitter_email, f"Submission Declined [{data.req_id}]", body)
             
-        # Delete from pending
         pending_sheet.delete_rows(target_row_idx)
         return {"status": "success"}
         
@@ -226,7 +220,7 @@ async def get_news():
         return {"articles": []}
 
 # -----------------------------------------------------------------------------
-# Frontend
+# Frontend HTML String
 # -----------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
@@ -262,7 +256,7 @@ async def serve_ui():
             
             <!-- User Form -->
             <div id="userAuthSection">
-                <form id="detailsForm" onsubmit="event.preventDefault(); requestOTP(event);" class="space-y-4">
+                <form id="detailsForm" class="space-y-4">
                     <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Full Name *</label><input type="text" id="userName" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-indigo-500"></div>
                     <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Institution / Company *</label><input type="text" id="userInst" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-indigo-500"></div>
                     <div class="grid grid-cols-2 gap-3">
@@ -273,10 +267,10 @@ async def serve_ui():
                         <input type="checkbox" id="userAgree" required class="mt-1 rounded bg-slate-900 border-slate-700 text-indigo-600 focus:ring-indigo-500">
                         <label for="userAgree" class="text-xs text-slate-400 leading-snug">I agree to the processing of my information for platform access.</label>
                     </div>
-                    <button type="submit" id="requestOtpBtn" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-lg text-sm transition">Request Access Code</button>
+                    <button type="button" id="requestOtpBtn" onclick="requestOTP(event)" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-lg text-sm transition">Request Access Code</button>
                 </form>
 
-                <form id="otpForm" onsubmit="verifyOTP(event)" class="space-y-4 hidden">
+                <form id="otpForm" onsubmit="event.preventDefault(); verifyOTP(event);" class="space-y-4 hidden">
                     <div class="text-center mb-4 bg-indigo-900/20 border border-indigo-500/20 p-3 rounded-lg">
                         <p class="text-xs text-slate-300 leading-relaxed">An access code has been sent to your email <strong id="displayEmail" class="text-indigo-400"></strong>. Please check your spam folder.</p>
                     </div>
@@ -292,7 +286,7 @@ async def serve_ui():
 
             <!-- Admin Form -->
             <div id="adminAuthSection" class="hidden">
-                <form id="adminForm" onsubmit="loginAdmin(event)" class="space-y-4">
+                <form id="adminForm" onsubmit="event.preventDefault(); loginAdmin(event);" class="space-y-4">
                     <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Admin Username</label><input type="text" id="adminUser" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-amber-500"></div>
                     <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Admin Password</label><input type="password" id="adminPass" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-amber-500"></div>
                     <button type="submit" class="w-full bg-amber-600 hover:bg-amber-500 text-white font-semibold py-2.5 rounded-lg text-sm transition mt-4">Login as Admin</button>
@@ -330,7 +324,6 @@ async def serve_ui():
     </header>
 
     <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        <!-- Content Sections (NUE-Hub, NRI, Journals, News) are dynamically populated -->
         <section id="section-nue" class="tab-content space-y-6">
             <h2 class="text-xl font-bold text-white mb-2 border-b border-slate-700 pb-2">NUE-Hub (Tools)</h2>
             <div id="toolsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5"></div>
@@ -376,7 +369,7 @@ async def serve_ui():
             <button onclick="document.getElementById('submitModal').classList.add('hidden')" class="absolute top-4 right-4 text-slate-400 hover:text-white"><i class="fa-solid fa-times text-xl"></i></button>
             <h3 class="text-xl font-bold text-white mb-4">Upload / Submit Data</h3>
             
-            <form id="submissionForm" onsubmit="handleDataSubmit(event)" class="space-y-4">
+            <form id="submissionForm" onsubmit="event.preventDefault(); handleDataSubmit(event);" class="space-y-4">
                 <div class="grid grid-cols-2 gap-4">
                     <div><label class="block text-xs text-slate-400 mb-1">Submitter Name</label><input type="text" id="subName" readonly class="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-500"></div>
                     <div><label class="block text-xs text-slate-400 mb-1">Submitter Email</label><input type="email" id="subEmail" readonly class="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-500"></div>
@@ -474,6 +467,14 @@ async def serve_ui():
             
             try {
                 if(!isResend) {
+                    const form = document.getElementById('detailsForm');
+                    
+                    // Force the browser to show what field is missing
+                    if (!form.checkValidity()) {
+                        form.reportValidity();
+                        return;
+                    }
+                    
                     pendingUser = {
                         name: document.getElementById('userName').value,
                         institution: document.getElementById('userInst').value,
@@ -492,6 +493,10 @@ async def serve_ui():
                     body: JSON.stringify({ name: pendingUser.name, email: pendingUser.email })
                 });
 
+                if (!res.ok) {
+                    throw new Error("Server returned status: " + res.status);
+                }
+
                 if(!isResend) {
                     document.getElementById('detailsForm').classList.add('hidden');
                     document.getElementById('otpForm').classList.remove('hidden');
@@ -505,8 +510,8 @@ async def serve_ui():
                 btn.disabled = false;
                 
             } catch (error) {
-                console.error("OTP Request Failed:", error);
-                alert("Something went wrong. Please try again.");
+                console.error("OTP Error:", error);
+                alert("Request failed. Please check your network or try again later.");
                 const btn = document.getElementById('requestOtpBtn');
                 btn.innerText = "Request Access Code"; 
                 btn.disabled = false;
@@ -711,7 +716,6 @@ async def serve_ui():
             const mainCat = document.getElementById('mainCat').value;
             const subCat = document.getElementById('subCat').value;
             
-            // Build Payload
             let payload = {};
             document.querySelectorAll('#dynamicFormArea input, #dynamicFormArea select, #dynamicFormArea textarea').forEach(el => {
                 if(el.id && el.id.startsWith('f_')) { payload[el.id.replace('f_','')] = el.value; }
@@ -739,7 +743,6 @@ async def serve_ui():
             btn.innerText = "Submit Request"; btn.disabled = false;
         }
 
-        // --- FETCH DATA (Tools, NRI, Journals, News) ---
         async function fetchData(cat) {
             const res = await fetch(`/api/data/${cat}`);
             const data = await res.json();
@@ -805,7 +808,6 @@ async def serve_ui():
             `).join('');
         }
 
-        // --- ADMIN DASHBOARD ---
         async function openAdminPanel() {
             document.getElementById('adminPanelModal').classList.remove('hidden');
             const res = await fetch('/api/admin/pending');
@@ -835,7 +837,7 @@ async def serve_ui():
             });
             if(res.ok) {
                 alert(`Action ${action} successful! Email sent.`);
-                openAdminPanel(); // refresh
+                openAdminPanel();
             } else { alert("Action failed."); }
         }
     </script>
