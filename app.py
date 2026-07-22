@@ -44,21 +44,20 @@ class OTPRequest(BaseModel):
 class VerifyOTP(UserAuth):
     otp: str
 
-class AdminLogin(BaseModel):
-    username: str
-    password: str
-
 class SubmissionData(BaseModel):
     submitter_name: str
     submitter_email: str
-    main_category: str  # NUE-Hub or NRI Directory
-    sub_category: str   # Tool type or NRI type
+    main_category: str
+    sub_category: str
     payload: Dict[str, Any]
 
 class AdminAction(BaseModel):
     req_id: str
-    action: str  # approve, decline, approve_modified
+    action: str 
     modified_payload: Optional[Dict[str, Any]] = None
+
+# Automatically grants Admin panel access to these emails
+ADMIN_EMAILS = ["deeptarupbiswas2020@gmail.com"]
 
 otp_store = {}
 
@@ -81,14 +80,27 @@ async def send_otp(req: OTPRequest):
     otp = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
     otp_store[req.email] = otp
     
-    body = f"Hello {req.name},\n\nYour secure access code for the Neuron to Neural Hub is:\n\n{otp}\n\nThis code will expire shortly."
-    send_email_via_webhook(req.email, "Neuron to Neural - Access Code", body)
-    return {"status": "success"}
+    script_url = os.environ.get("GOOGLE_SCRIPT_URL")
+    if not script_url:
+        print(f"Webhook not configured. OTP for {req.email} is: {otp}")
+        return {"status": "success", "message": "Check server logs for OTP."}
+        
+    try:
+        body = f"Hello {req.name},\n\nYour secure access code for the Neuron to Neural Hub is:\n\n{otp}\n\nThis code will expire shortly."
+        response = requests.post(script_url, json={"to": req.email, "subject": "Neuron to Neural - Access Code", "body": body})
+        if response.status_code == 200:
+            return {"status": "success"}
+        else:
+            raise Exception(f"Google Script returned status {response.status_code}")
+    except Exception as e:
+        print(f"Email error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send email. Please try again.")
 
 @app.post("/api/verify-otp")
 async def verify_otp_and_login(data: VerifyOTP):
     if otp_store.get(data.email) != data.otp:
         raise HTTPException(status_code=400, detail="Invalid or expired Access Code.")
+        
     del otp_store[data.email]
     
     client = get_gspread_client()
@@ -99,13 +111,9 @@ async def verify_otp_and_login(data: VerifyOTP):
             sheet.append_row([timestamp, data.name, data.institution, data.country, data.email])
         except Exception:
             pass
-    return {"status": "success", "email": data.email, "role": "user"}
-
-@app.post("/api/admin-login")
-async def admin_login(data: AdminLogin):
-    if data.username == "N2Nhead" and data.password == "N2N1234??":
-        return {"status": "success", "role": "admin"}
-    raise HTTPException(status_code=403, detail="Invalid credentials")
+            
+    is_admin = data.email in ADMIN_EMAILS
+    return {"status": "success", "email": data.email, "is_admin": is_admin}
 
 @app.post("/api/submit-data")
 async def submit_data(data: SubmissionData):
@@ -120,11 +128,9 @@ async def submit_data(data: SubmissionData):
                 req_id, timestamp, data.submitter_email, data.submitter_name, 
                 data.main_category, data.sub_category, json.dumps(data.payload)
             ])
-            
             body = f"Hello {data.submitter_name},\n\nThank you for submitting to the Neuron to Neural Hub.\nYour request number is: {req_id}.\n\nThe Admin will check the information, and you will receive a notification once it is approved and added to the platform."
             send_email_via_webhook(data.submitter_email, f"Submission Received [{req_id}]", body)
         except Exception as e:
-            print(f"Submit error: {e}")
             raise HTTPException(status_code=500, detail="Failed to save submission.")
             
     return {"status": "success", "req_id": req_id}
@@ -135,8 +141,7 @@ async def get_pending():
     if not client: return {"requests": []}
     try:
         sheet = client.open("Neuron2Neural_DB").worksheet("Pending_Submissions")
-        records = sheet.get_all_records()
-        return {"requests": records}
+        return {"requests": sheet.get_all_records()}
     except Exception:
         return {"requests": []}
 
@@ -167,7 +172,6 @@ async def process_admin_action(data: AdminAction):
         if data.action in ["approve", "approve_modified"]:
             target_sheet_name = "Tools" if target_record["main_category"] == "NUE-Hub" else "NRI"
             target_sheet = db.worksheet(target_sheet_name)
-            
             row_data = [datetime.now().strftime("%Y-%m-%d")] + list(payload_to_save.values())
             target_sheet.append_row(row_data)
             
@@ -180,9 +184,7 @@ async def process_admin_action(data: AdminAction):
             
         pending_sheet.delete_rows(target_row_idx)
         return {"status": "success"}
-        
     except Exception as e:
-        print(f"Action error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/data/journals")
@@ -190,9 +192,7 @@ async def get_journals():
     client = get_gspread_client()
     if client:
         try:
-            sheet = client.open("Neuron2Neural_DB").worksheet("Journals")
-            records = sheet.get_all_records()
-            return {"journals": records}
+            return {"journals": client.open("Neuron2Neural_DB").worksheet("Journals").get_all_records()}
         except Exception:
             pass
     return {"journals": []}
@@ -203,9 +203,7 @@ async def get_data(category: str):
     sheet_name = "Tools" if category == "tools" else "NRI"
     if client:
         try:
-            sheet = client.open("Neuron2Neural_DB").worksheet(sheet_name)
-            records = sheet.get_all_records()
-            return {"data": records}
+            return {"data": client.open("Neuron2Neural_DB").worksheet(sheet_name).get_all_records()}
         except Exception:
             pass
     return {"data": []}
@@ -220,7 +218,7 @@ async def get_news():
         return {"articles": []}
 
 # -----------------------------------------------------------------------------
-# Frontend HTML String
+# Frontend HTML/JS Route
 # -----------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
@@ -233,65 +231,44 @@ async def serve_ui():
     <title>Neuron to Neural | Bharat Brain Research Hub</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <style>
-        .loader { border-top-color: #6366f1; animation: spinner 1.5s linear infinite; }
-        @keyframes spinner { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-    </style>
 </head>
 <body class="h-full flex flex-col font-sans antialiased selection:bg-indigo-500 selection:text-white">
 
     <!-- Auth Modal -->
     <div id="authModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto">
         <div class="bg-slate-800 border border-slate-700 rounded-2xl p-6 sm:p-8 max-w-md w-full shadow-2xl relative my-8">
-            <div class="absolute top-4 right-4 flex space-x-2">
-                <button onclick="toggleAdminAuth(false)" id="tabUserAuth" class="text-xs text-indigo-400 font-bold px-2 py-1 bg-indigo-900/30 rounded border border-indigo-500/30">User Login</button>
-                <button onclick="toggleAdminAuth(true)" id="tabAdminAuth" class="text-xs text-slate-400 font-bold px-2 py-1 rounded hover:text-white transition">Admin Login</button>
-            </div>
-            
             <div class="text-center mb-6 mt-4">
                 <div class="w-12 h-12 bg-indigo-600/20 text-indigo-400 rounded-full flex items-center justify-center mx-auto mb-3 text-2xl">🧠</div>
                 <h2 class="text-2xl font-bold text-white">Neuron to Neural</h2>
                 <p class="text-xs text-indigo-400 font-medium tracking-wide uppercase mt-1">Bharat Brain Research Hub</p>
             </div>
             
-            <!-- User Form -->
-            <div id="userAuthSection">
-                <form id="detailsForm" class="space-y-4">
-                    <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Full Name *</label><input type="text" id="userName" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-indigo-500"></div>
-                    <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Institution / Company *</label><input type="text" id="userInst" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-indigo-500"></div>
-                    <div class="grid grid-cols-2 gap-3">
-                        <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Country *</label><input type="text" id="userCountry" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-indigo-500"></div>
-                        <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Valid Email *</label><input type="email" id="userEmail" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-indigo-500"></div>
-                    </div>
-                    <div class="flex items-start gap-2 pt-2">
-                        <input type="checkbox" id="userAgree" required class="mt-1 rounded bg-slate-900 border-slate-700 text-indigo-600 focus:ring-indigo-500">
-                        <label for="userAgree" class="text-xs text-slate-400 leading-snug">I agree to the processing of my information for platform access.</label>
-                    </div>
-                    <button type="button" id="requestOtpBtn" onclick="requestOTP(event)" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-lg text-sm transition">Request Access Code</button>
-                </form>
+            <form id="detailsForm" onsubmit="requestOTP(event)" class="space-y-4">
+                <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Full Name *</label><input type="text" id="userName" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"></div>
+                <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Institution / Company *</label><input type="text" id="userInst" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"></div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Country *</label><input type="text" id="userCountry" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"></div>
+                    <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Valid Email *</label><input type="email" id="userEmail" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"></div>
+                </div>
+                <div class="flex items-start gap-2 pt-2">
+                    <input type="checkbox" id="userAgree" required class="mt-1 rounded bg-slate-900 border-slate-700 text-indigo-600 focus:ring-indigo-500">
+                    <label for="userAgree" class="text-xs text-slate-400 leading-snug">I agree to the processing of my information for platform access.</label>
+                </div>
+                <button type="submit" id="requestOtpBtn" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-lg text-sm transition">Request Access Code</button>
+            </form>
 
-                <form id="otpForm" onsubmit="event.preventDefault(); verifyOTP(event);" class="space-y-4 hidden">
-                    <div class="text-center mb-4 bg-indigo-900/20 border border-indigo-500/20 p-3 rounded-lg">
-                        <p class="text-xs text-slate-300 leading-relaxed">An access code has been sent to your email <strong id="displayEmail" class="text-indigo-400"></strong>. Please check your spam folder.</p>
-                    </div>
-                    <div><input type="text" id="userOtp" required maxlength="6" placeholder="ENTER 6-DIGIT CODE" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-3 text-lg text-center tracking-[0.5em] font-mono text-white focus:border-indigo-500"></div>
-                    <button type="submit" id="verifyOtpBtn" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2.5 rounded-lg text-sm transition">Verify & Enter</button>
-                    
-                    <div class="flex justify-between items-center mt-3 border-t border-slate-700 pt-3">
-                        <button type="button" onclick="backToDetails()" class="text-xs text-slate-400 hover:text-white transition">← Wrong Email ID?</button>
-                        <button type="button" id="resendBtn" onclick="resendOTP()" disabled class="text-xs text-indigo-400 disabled:text-slate-500 transition">Resend Code (60s)</button>
-                    </div>
-                </form>
-            </div>
-
-            <!-- Admin Form -->
-            <div id="adminAuthSection" class="hidden">
-                <form id="adminForm" onsubmit="event.preventDefault(); loginAdmin(event);" class="space-y-4">
-                    <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Admin Username</label><input type="text" id="adminUser" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-amber-500"></div>
-                    <div><label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Admin Password</label><input type="password" id="adminPass" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-amber-500"></div>
-                    <button type="submit" class="w-full bg-amber-600 hover:bg-amber-500 text-white font-semibold py-2.5 rounded-lg text-sm transition mt-4">Login as Admin</button>
-                </form>
-            </div>
+            <form id="otpForm" onsubmit="verifyOTP(event)" class="space-y-4 hidden">
+                <div class="text-center mb-4 bg-indigo-900/20 border border-indigo-500/20 p-3 rounded-lg">
+                    <p class="text-xs text-slate-300 leading-relaxed">An access code has been sent to your email <strong id="displayEmail" class="text-indigo-400"></strong>.</p>
+                </div>
+                <div><input type="text" id="userOtp" required maxlength="6" placeholder="ENTER 6-DIGIT CODE" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-3 text-lg text-center tracking-[0.5em] font-mono text-white focus:border-indigo-500 focus:outline-none"></div>
+                <button type="submit" id="verifyOtpBtn" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2.5 rounded-lg text-sm transition">Verify & Enter</button>
+                
+                <div class="flex justify-between items-center mt-3 border-t border-slate-700 pt-3">
+                    <button type="button" onclick="backToDetails()" class="text-xs text-slate-400 hover:text-white transition">← Wrong Email ID?</button>
+                    <button type="button" id="resendBtn" onclick="resendOTP()" disabled class="text-xs text-indigo-400 disabled:text-slate-500 transition">Resend Code (60s)</button>
+                </div>
+            </form>
         </div>
     </div>
 
@@ -308,7 +285,7 @@ async def serve_ui():
                 </div>
                 <div class="flex items-center space-x-2">
                     <span id="userBadge" class="hidden sm:inline-block text-xs bg-slate-700 text-slate-300 px-3 py-1 rounded-full border border-slate-600"></span>
-                    <button id="submitBtn" onclick="openSubmitModal()" class="hidden bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded-full font-semibold transition"><i class="fa-solid fa-cloud-arrow-up mr-1"></i> Upload/Submit Data</button>
+                    <button id="submitBtn" onclick="openSubmitModal()" class="hidden bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-1.5 rounded-full font-semibold transition"><i class="fa-solid fa-cloud-arrow-up mr-1"></i> Upload/Submit</button>
                     <button id="adminPanelBtn" onclick="openAdminPanel()" class="hidden bg-amber-600 hover:bg-amber-500 text-white text-xs px-3 py-1.5 rounded-full font-semibold transition"><i class="fa-solid fa-lock mr-1"></i> Admin Panel</button>
                     <button id="logoutBtn" onclick="logoutUser()" class="hidden bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1.5 rounded-full font-semibold transition"><i class="fa-solid fa-sign-out-alt"></i></button>
                 </div>
@@ -368,13 +345,11 @@ async def serve_ui():
         <div class="bg-slate-800 border border-slate-700 rounded-2xl p-6 max-w-2xl w-full my-8 relative">
             <button onclick="document.getElementById('submitModal').classList.add('hidden')" class="absolute top-4 right-4 text-slate-400 hover:text-white"><i class="fa-solid fa-times text-xl"></i></button>
             <h3 class="text-xl font-bold text-white mb-4">Upload / Submit Data</h3>
-            
-            <form id="submissionForm" onsubmit="event.preventDefault(); handleDataSubmit(event);" class="space-y-4">
+            <form id="submissionForm" onsubmit="handleDataSubmit(event)" class="space-y-4">
                 <div class="grid grid-cols-2 gap-4">
                     <div><label class="block text-xs text-slate-400 mb-1">Submitter Name</label><input type="text" id="subName" readonly class="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-500"></div>
                     <div><label class="block text-xs text-slate-400 mb-1">Submitter Email</label><input type="email" id="subEmail" readonly class="w-full bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-500"></div>
                 </div>
-
                 <div>
                     <label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Main Category</label>
                     <select id="mainCat" onchange="renderDynamicForm()" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-indigo-500">
@@ -383,14 +358,7 @@ async def serve_ui():
                         <option value="NRI Directory">NRI Directory (People/Centers)</option>
                     </select>
                 </div>
-                
                 <div id="dynamicFormArea" class="space-y-4 border-t border-slate-700 pt-4 mt-4 hidden"></div>
-
-                <div class="bg-indigo-900/20 border border-indigo-500/20 p-3 rounded-lg flex gap-3 items-start">
-                    <i class="fa-solid fa-info-circle text-indigo-400 mt-0.5"></i>
-                    <p class="text-xs text-slate-300">The information will be verified by the Admin and will be approved before being added to the public website. You will receive an email confirmation.</p>
-                </div>
-
                 <button type="submit" id="finalSubmitBtn" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-lg text-sm transition hidden">Submit Request</button>
             </form>
         </div>
@@ -403,7 +371,6 @@ async def serve_ui():
                 <h3 class="text-xl font-bold text-amber-400"><i class="fa-solid fa-lock mr-2"></i>Admin Dashboard</h3>
                 <button onclick="document.getElementById('adminPanelModal').classList.add('hidden')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-times text-xl"></i></button>
             </div>
-            
             <div class="flex-1 overflow-auto">
                 <h4 class="text-white font-semibold mb-3">Pending Submissions</h4>
                 <div class="overflow-x-auto bg-slate-900 rounded-xl border border-slate-700">
@@ -443,78 +410,61 @@ async def serve_ui():
             switchTab('nue');
         });
 
-        function toggleAdminAuth(showAdmin) {
-            const userSec = document.getElementById('userAuthSection');
-            const adminSec = document.getElementById('adminAuthSection');
-            const tabUser = document.getElementById('tabUserAuth');
-            const tabAdmin = document.getElementById('tabAdminAuth');
+        // ------------------------- AUTH FLOW -------------------------
+        async function requestOTP(e) {
+            e.preventDefault();
+            const btn = document.getElementById('requestOtpBtn');
+            btn.innerText = "Sending Code..."; btn.disabled = true;
 
-            if (showAdmin) {
-                userSec.classList.add('hidden');
-                adminSec.classList.remove('hidden');
-                tabAdmin.className = 'text-xs text-amber-400 font-bold px-2 py-1 bg-amber-900/30 rounded border border-amber-500/30';
-                tabUser.className = 'text-xs text-slate-400 font-bold px-2 py-1 rounded hover:text-white transition';
+            pendingUser = {
+                name: document.getElementById('userName').value,
+                institution: document.getElementById('userInst').value,
+                country: document.getElementById('userCountry').value,
+                email: document.getElementById('userEmail').value
+            };
+
+            const res = await fetch('/api/send-otp', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: pendingUser.name, email: pendingUser.email })
+            });
+
+            btn.innerText = "Request Access Code"; btn.disabled = false;
+
+            if (res.ok) {
+                document.getElementById('detailsForm').classList.add('hidden');
+                document.getElementById('otpForm').classList.remove('hidden');
+                document.getElementById('displayEmail').innerText = pendingUser.email;
+                startResendTimer();
             } else {
-                userSec.classList.remove('hidden');
-                adminSec.classList.add('hidden');
-                tabAdmin.className = 'text-xs text-slate-400 font-bold px-2 py-1 rounded hover:text-white transition';
-                tabUser.className = 'text-xs text-indigo-400 font-bold px-2 py-1 bg-indigo-900/30 rounded border border-indigo-500/30';
+                alert("Failed to send code. Please try again.");
             }
         }
 
-        async function requestOTP(e, isResend = false) {
-            if(e) e.preventDefault();
+        async function verifyOTP(e) {
+            e.preventDefault();
+            const btn = document.getElementById('verifyOtpBtn');
+            btn.innerText = "Verifying...";
             
-            try {
-                if(!isResend) {
-                    const form = document.getElementById('detailsForm');
-                    
-                    // Force the browser to show what field is missing
-                    if (!form.checkValidity()) {
-                        form.reportValidity();
-                        return;
-                    }
-                    
-                    pendingUser = {
-                        name: document.getElementById('userName').value,
-                        institution: document.getElementById('userInst').value,
-                        country: document.getElementById('userCountry').value,
-                        email: document.getElementById('userEmail').value
-                    };
-                }
-                
-                const btn = document.getElementById('requestOtpBtn');
-                btn.innerText = "Sending Code..."; 
-                btn.disabled = true;
+            const otpCode = document.getElementById('userOtp').value.toUpperCase();
+            const payload = { ...pendingUser, otp: otpCode };
 
-                const res = await fetch('/api/send-otp', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: pendingUser.name, email: pendingUser.email })
-                });
+            const res = await fetch('/api/verify-otp', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
 
-                if (!res.ok) {
-                    throw new Error("Server returned status: " + res.status);
-                }
+            btn.innerText = "Verify & Enter";
 
-                if(!isResend) {
-                    document.getElementById('detailsForm').classList.add('hidden');
-                    document.getElementById('otpForm').classList.remove('hidden');
-                    document.getElementById('displayEmail').innerText = pendingUser.email;
-                    startResendTimer();
-                } else {
-                    alert("New code sent!");
-                }
-                
-                btn.innerText = "Request Access Code"; 
-                btn.disabled = false;
-                
-            } catch (error) {
-                console.error("OTP Error:", error);
-                alert("Request failed. Please check your network or try again later.");
-                const btn = document.getElementById('requestOtpBtn');
-                btn.innerText = "Request Access Code"; 
-                btn.disabled = false;
+            if (res.ok) {
+                const data = await res.json();
+                currentUser = { ...pendingUser, is_admin: data.is_admin };
+                localStorage.setItem('n2n_user', JSON.stringify(currentUser));
+                document.getElementById('authModal').classList.add('hidden');
+                setupUserUI();
+            } else {
+                alert("Invalid or Expired Code. Please try again.");
             }
         }
 
@@ -527,12 +477,8 @@ async def serve_ui():
                 timeLeft--;
                 if(timeLeft <= 0) {
                     clearInterval(resendTimer);
-                    if(resendCount === 0) {
-                        btn.innerText = "Resend Code";
-                        btn.disabled = false;
-                    } else {
-                        btn.innerText = "Resend Limit Reached";
-                    }
+                    btn.innerText = resendCount === 0 ? "Resend Code" : "Resend Limit Reached";
+                    btn.disabled = resendCount !== 0;
                 } else {
                     btn.innerText = `Resend Code (${timeLeft}s)`;
                 }
@@ -542,42 +488,9 @@ async def serve_ui():
         function resendOTP() {
             resendCount++;
             document.getElementById('resendBtn').disabled = true;
-            requestOTP(null, true);
-        }
-
-        async function verifyOTP(e) {
-            e.preventDefault();
-            const btn = document.getElementById('verifyOtpBtn');
-            btn.innerText = "Verifying...";
-            
-            const otpCode = document.getElementById('userOtp').value.toUpperCase();
-            const payload = { ...pendingUser, otp: otpCode };
-            const res = await fetch('/api/verify-otp', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-
-            if (res.ok) {
-                const data = await res.json();
-                currentUser = { ...pendingUser, role: data.role };
-                finishLogin();
-            } else {
-                alert("Invalid or Expired Code.");
-                btn.innerText = "Verify & Enter";
-            }
-        }
-
-        async function loginAdmin(e) {
-            e.preventDefault();
-            const payload = { username: document.getElementById('adminUser').value, password: document.getElementById('adminPass').value };
-            const res = await fetch('/api/admin-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-            if(res.ok) {
-                currentUser = { name: "Admin", email: "admin@neuron2neural.org", role: "admin" };
-                finishLogin();
-            } else { alert("Invalid Admin Credentials"); }
-        }
-
-        function finishLogin() {
-            localStorage.setItem('n2n_user', JSON.stringify(currentUser));
-            document.getElementById('authModal').classList.add('hidden');
-            setupUserUI();
+            const mockEvent = { preventDefault: () => {} };
+            requestOTP(mockEvent);
+            alert("New code sent!");
         }
 
         function backToDetails() {
@@ -596,11 +509,10 @@ async def serve_ui():
             document.getElementById('userBadge').innerText = currentUser.name;
             document.getElementById('userBadge').classList.remove('hidden');
             document.getElementById('logoutBtn').classList.remove('hidden');
+            document.getElementById('submitBtn').classList.remove('hidden');
             
-            if (currentUser.role === 'admin') {
+            if (currentUser.is_admin) {
                 document.getElementById('adminPanelBtn').classList.remove('hidden');
-            } else {
-                document.getElementById('submitBtn').classList.remove('hidden');
             }
         }
 
@@ -616,7 +528,7 @@ async def serve_ui():
             activeBtn.classList.remove('text-slate-300');
         }
 
-        // --- DYNAMIC FORM LOGIC ---
+        // ------------------------- DYNAMIC FORMS -------------------------
         function openSubmitModal() {
             document.getElementById('submitModal').classList.remove('hidden');
             document.getElementById('subName').value = currentUser.name;
@@ -713,9 +625,6 @@ async def serve_ui():
             const btn = document.getElementById('finalSubmitBtn');
             btn.innerText = "Submitting..."; btn.disabled = true;
 
-            const mainCat = document.getElementById('mainCat').value;
-            const subCat = document.getElementById('subCat').value;
-            
             let payload = {};
             document.querySelectorAll('#dynamicFormArea input, #dynamicFormArea select, #dynamicFormArea textarea').forEach(el => {
                 if(el.id && el.id.startsWith('f_')) { payload[el.id.replace('f_','')] = el.value; }
@@ -724,8 +633,8 @@ async def serve_ui():
             const submitData = {
                 submitter_name: currentUser.name,
                 submitter_email: currentUser.email,
-                main_category: mainCat,
-                sub_category: subCat,
+                main_category: document.getElementById('mainCat').value,
+                sub_category: document.getElementById('subCat').value,
                 payload: payload
             };
 
@@ -743,29 +652,26 @@ async def serve_ui():
             btn.innerText = "Submit Request"; btn.disabled = false;
         }
 
+        // ------------------------- DATA FETCHING -------------------------
         async function fetchData(cat) {
             const res = await fetch(`/api/data/${cat}`);
             const data = await res.json();
-            if(cat === 'tools') renderTools(data.data);
-            if(cat === 'nri') renderNRI(data.data);
-        }
-
-        function renderTools(tools) {
-            document.getElementById('toolsGrid').innerHTML = tools.map(t => `
-                <div class="bg-slate-800/80 border border-slate-700/80 p-5 rounded-xl">
-                    <h3 class="font-bold text-white text-base">${t.Name || t.name || 'Unnamed Tool'}</h3>
-                    <p class="text-xs text-slate-400 mt-2">${t.Description || t.desc || ''}</p>
-                </div>
-            `).join('');
-        }
-
-        function renderNRI(nri) {
-            document.getElementById('nriGrid').innerHTML = nri.map(t => `
-                <div class="bg-slate-800/60 border border-slate-700/60 p-4 rounded-xl">
-                    <h4 class="text-sm font-bold text-white">${t.Name || t.fname || 'Unnamed'}</h4>
-                    <p class="text-xs text-slate-400">${t.Institution || t.state || t.desc || ''}</p>
-                </div>
-            `).join('');
+            if(cat === 'tools') {
+                document.getElementById('toolsGrid').innerHTML = data.data.map(t => `
+                    <div class="bg-slate-800/80 border border-slate-700/80 p-5 rounded-xl">
+                        <h3 class="font-bold text-white text-base">${t.Name || t.name || 'Unnamed Tool'}</h3>
+                        <p class="text-xs text-slate-400 mt-2">${t.Description || t.desc || ''}</p>
+                    </div>
+                `).join('');
+            }
+            if(cat === 'nri') {
+                document.getElementById('nriGrid').innerHTML = data.data.map(t => `
+                    <div class="bg-slate-800/60 border border-slate-700/60 p-4 rounded-xl">
+                        <h4 class="text-sm font-bold text-white">${t.Name || t.fname || 'Unnamed'}</h4>
+                        <p class="text-xs text-slate-400">${t.Institution || t.state || t.desc || ''}</p>
+                    </div>
+                `).join('');
+            }
         }
 
         async function fetchJournals() {
@@ -778,16 +684,13 @@ async def serve_ui():
         function filterJournalsRealtime() {
             const query = document.getElementById('journalSearchText').value.toLowerCase();
             const header = document.getElementById('journalSearchHeader').value;
-            
             const filtered = allJournals.filter(j => {
                 if(!query) return true;
                 const val = j[header];
                 if(typeof val === 'string') return val.toLowerCase().includes(query);
                 return false;
             });
-
-            const tbody = document.getElementById('journalsTableBody');
-            tbody.innerHTML = filtered.slice(0, 100).map(j => `
+            document.getElementById('journalsTableBody').innerHTML = filtered.slice(0, 100).map(j => `
                 <tr>
                     <td class="px-4 py-3"><a href="${j['Journal URL'] || '#'}" target="_blank" class="text-indigo-400 hover:underline font-medium">${j['Journal title']}</a></td>
                     <td class="px-4 py-3">${j['Publisher'] || '-'}</td>
@@ -808,13 +711,12 @@ async def serve_ui():
             `).join('');
         }
 
+        // ------------------------- ADMIN PANEL -------------------------
         async function openAdminPanel() {
             document.getElementById('adminPanelModal').classList.remove('hidden');
             const res = await fetch('/api/admin/pending');
             const data = await res.json();
-            
-            const tbody = document.getElementById('adminTableBody');
-            tbody.innerHTML = data.requests.map(r => `
+            document.getElementById('adminTableBody').innerHTML = data.requests.map(r => `
                 <tr>
                     <td class="px-4 py-3 font-mono text-[10px]">${r.req_id || r.ID}</td>
                     <td class="px-4 py-3 text-xs">${r.submitter_name}<br><span class="text-slate-500">${r.submitter_email}</span></td>
@@ -837,8 +739,10 @@ async def serve_ui():
             });
             if(res.ok) {
                 alert(`Action ${action} successful! Email sent.`);
-                openAdminPanel();
-            } else { alert("Action failed."); }
+                openAdminPanel(); // Refresh table
+            } else {
+                alert("Action failed.");
+            }
         }
     </script>
 </body>
