@@ -85,24 +85,26 @@ async def send_otp(req: OTPRequest):
     otp = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
     otp_store[req.email] = otp
     
-    sender_email = os.environ.get("SMTP_EMAIL")
-    sender_password = os.environ.get("SMTP_PASSWORD")
+    script_url = os.environ.get("GOOGLE_SCRIPT_URL")
     
-    if not sender_email or not sender_password:
-        # Fallback to console if secrets are missing
-        print(f"SMTP not configured. OTP for {req.email} is: {otp}")
+    if not script_url:
+        print(f"Webhook not configured. OTP for {req.email} is: {otp}")
         return {"status": "success", "message": "Check server logs for OTP."}
         
     try:
-        msg = MIMEText(f"Hello {req.name},\n\nYour secure access code for the Neuron to Neural Hub is:\n\n{otp}\n\nThis code will expire shortly.")
-        msg['Subject'] = 'Neuron to Neural - Access Code'
-        msg['From'] = sender_email
-        msg['To'] = req.email
+        payload = {
+            "to": req.email,
+            "subject": "Neuron to Neural - Access Code",
+            "body": f"Hello {req.name},\n\nYour secure access code for the Neuron to Neural Hub is:\n\n{otp}\n\nThis code will expire shortly."
+        }
+        # Send HTTP POST request to bypass Hugging Face email block
+        response = requests.post(script_url, json=payload)
         
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            server.login(sender_email, sender_password)
-            server.send_message(msg)
-        return {"status": "success"}
+        if response.status_code == 200:
+            return {"status": "success"}
+        else:
+            raise Exception(f"Google Script returned status {response.status_code}")
+            
     except Exception as e:
         print(f"Email error: {e}")
         raise HTTPException(status_code=500, detail="Failed to send email. Please try again.")
