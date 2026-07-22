@@ -1,5 +1,9 @@
 import os
 import json
+import smtplib
+import random
+import string
+from email.mime.text import MIMEText
 from datetime import datetime
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Request
@@ -33,6 +37,13 @@ class UserAuth(BaseModel):
     country: str
     email: str
 
+class OTPRequest(BaseModel):
+    name: str
+    email: str
+
+class VerifyOTP(UserAuth):
+    otp: str
+
 class ToolItem(BaseModel):
     name: str
     category: str
@@ -43,6 +54,9 @@ class ToolItem(BaseModel):
     icon: Optional[str] = "🧠"
 
 ADMIN_EMAILS = ["deeptarupbiswas2020@gmail.com"]
+
+# In-memory storage for OTPs (wiped on server restart)
+otp_store = {}
 
 SAMPLE_TOOLS = [
     {
@@ -59,26 +73,60 @@ SAMPLE_TOOLS = [
 ]
 
 SAMPLE_NRI = [
-    {"type": "Center", "name": "National Brain Research Centre (NBRC)", "location": "Manesar, Haryana", "link": "https://www.nbrc.ac.in"},
-    {"type": "Lab", "name": "IIT Bombay Computational Neurobiology Lab", "location": "Mumbai, Maharashtra", "link": "https://www.iitb.ac.in"}
+    {"type": "Center", "name": "National Brain Research Centre (NBRC)", "location": "Manesar, Haryana", "link": "https://www.nbrc.ac.in"}
 ]
 
 # -----------------------------------------------------------------------------
 # API Endpoints
 # -----------------------------------------------------------------------------
-@app.post("/api/login")
-async def login_user(user: UserAuth):
+@app.post("/api/send-otp")
+async def send_otp(req: OTPRequest):
+    # Generate 6-digit alphanumeric OTP
+    otp = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+    otp_store[req.email] = otp
+    
+    sender_email = os.environ.get("SMTP_EMAIL")
+    sender_password = os.environ.get("SMTP_PASSWORD")
+    
+    if not sender_email or not sender_password:
+        # Fallback to console if secrets are missing
+        print(f"SMTP not configured. OTP for {req.email} is: {otp}")
+        return {"status": "success", "message": "Check server logs for OTP."}
+        
+    try:
+        msg = MIMEText(f"Hello {req.name},\n\nYour secure access code for the Neuron to Neural Hub is:\n\n{otp}\n\nThis code will expire shortly.")
+        msg['Subject'] = 'Neuron to Neural - Access Code'
+        msg['From'] = sender_email
+        msg['To'] = req.email
+        
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+        return {"status": "success"}
+    except Exception as e:
+        print(f"Email error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send email. Please try again.")
+
+@app.post("/api/verify-otp")
+async def verify_otp_and_login(data: VerifyOTP):
+    if otp_store.get(data.email) != data.otp:
+        raise HTTPException(status_code=400, detail="Invalid or expired Access Code.")
+        
+    # Clear the OTP once used
+    del otp_store[data.email]
+    
+    # Save user to Google Sheet
     client = get_gspread_client()
     if client:
         try:
             sheet = client.open("Neuron2Neural_DB").worksheet("Users")
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.append_row([timestamp, user.name, user.institution, user.country, user.email])
+            sheet.append_row([timestamp, data.name, data.institution, data.country, data.email])
         except Exception as e:
             print(f"Error appending to sheet: {e}")
     
-    is_admin = user.email in ADMIN_EMAILS
-    return {"status": "success", "email": user.email, "is_admin": is_admin}
+    is_admin = data.email in ADMIN_EMAILS
+    return {"status": "success", "email": data.email, "is_admin": is_admin}
 
 @app.get("/api/tools")
 async def get_tools():
@@ -163,7 +211,8 @@ async def serve_ui():
                 <p class="text-xs text-indigo-400 font-medium tracking-wide uppercase mt-1">Bharat Brain Research Hub</p>
             </div>
             
-            <form id="loginForm" onsubmit="handleLogin(event)" class="space-y-4">
+            <!-- Step 1: Details Form -->
+            <form id="detailsForm" onsubmit="requestOTP(event)" class="space-y-4">
                 <div>
                     <label class="block text-xs font-semibold text-slate-300 uppercase mb-1">Full Name *</label>
                     <input type="text" id="userName" required class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500">
@@ -184,9 +233,22 @@ async def serve_ui():
                 </div>
                 <div class="flex items-start gap-2 pt-2">
                     <input type="checkbox" id="userAgree" required class="mt-1 rounded bg-slate-900 border-slate-700 text-indigo-600 focus:ring-indigo-500">
-                    <label for="userAgree" class="text-xs text-slate-400 leading-snug">I agree to session usage for NCBI API compliance and platform updates.</label>
+                    <label for="userAgree" class="text-xs text-slate-400 leading-snug">I agree to the processing of my information for platform access, session management, and related updates.</label>
                 </div>
-                <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-lg text-sm transition shadow-lg shadow-indigo-600/30">Enter Access Portal</button>
+                <button type="submit" id="requestOtpBtn" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-lg text-sm transition shadow-lg shadow-indigo-600/30">Request Access Code</button>
+            </form>
+
+            <!-- Step 2: OTP Verification Form (Hidden by default) -->
+            <form id="otpForm" onsubmit="verifyOTP(event)" class="space-y-4 hidden">
+                <div class="text-center mb-4">
+                    <p class="text-sm text-slate-300">An access code has been sent to your email.</p>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-300 uppercase mb-1 text-center">Enter 6-Digit Code</label>
+                    <input type="text" id="userOtp" required maxlength="6" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-3 text-lg text-center tracking-[0.5em] font-mono text-white focus:outline-none focus:border-indigo-500">
+                </div>
+                <button type="submit" id="verifyOtpBtn" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-2.5 rounded-lg text-sm transition shadow-lg shadow-emerald-600/30">Verify & Enter Portal</button>
+                <button type="button" onclick="backToDetails()" class="w-full text-xs text-slate-400 hover:text-white transition mt-2">← Back to Details</button>
             </form>
         </div>
     </div>
@@ -206,6 +268,10 @@ async def serve_ui():
                     <span id="userBadge" class="hidden sm:inline-block text-xs bg-slate-700 text-slate-300 px-3 py-1 rounded-full border border-slate-600"></span>
                     <button id="adminBtn" onclick="openAdminModal()" class="hidden bg-amber-600/20 text-amber-400 border border-amber-500/40 hover:bg-amber-600/30 text-xs px-3 py-1 rounded-full font-semibold transition">
                         <i class="fa-solid fa-lock mr-1"></i> Admin
+                    </button>
+                    <!-- Logout Button -->
+                    <button id="logoutBtn" onclick="logoutUser()" class="hidden bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs px-3 py-1 rounded-full font-semibold transition">
+                        <i class="fa-solid fa-sign-out-alt mr-1"></i> Logout
                     </button>
                 </div>
             </div>
@@ -300,6 +366,7 @@ async def serve_ui():
     <!-- Scripts -->
     <script>
         let currentUser = null;
+        let pendingUser = null;
         let allTools = [];
         let selectedCategory = 'All';
 
@@ -316,26 +383,87 @@ async def serve_ui():
             switchTab('nue');
         });
 
-        async function handleLogin(e) {
+        // Step 1: Request OTP
+        async function requestOTP(e) {
             e.preventDefault();
-            const payload = {
+            const btn = document.getElementById('requestOtpBtn');
+            btn.innerText = "Sending Code...";
+            btn.disabled = true;
+
+            pendingUser = {
                 name: document.getElementById('userName').value,
                 institution: document.getElementById('userInst').value,
                 country: document.getElementById('userCountry').value,
                 email: document.getElementById('userEmail').value
             };
 
-            const res = await fetch('/api/login', {
+            const res = await fetch('/api/send-otp', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: pendingUser.name, email: pendingUser.email })
+            });
+
+            btn.innerText = "Request Access Code";
+            btn.disabled = false;
+
+            if (res.ok) {
+                document.getElementById('detailsForm').classList.add('hidden');
+                document.getElementById('otpForm').classList.remove('hidden');
+            } else {
+                alert("Failed to send code. Please try again.");
+            }
+        }
+
+        // Step 2: Verify OTP
+        async function verifyOTP(e) {
+            e.preventDefault();
+            const btn = document.getElementById('verifyOtpBtn');
+            btn.innerText = "Verifying...";
+            
+            const otpCode = document.getElementById('userOtp').value.toUpperCase();
+            const payload = { ...pendingUser, otp: otpCode };
+
+            const res = await fetch('/api/verify-otp', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
 
-            const data = await res.json();
-            currentUser = { ...payload, is_admin: data.is_admin };
-            localStorage.setItem('n2n_user', JSON.stringify(currentUser));
-            document.getElementById('authModal').classList.add('hidden');
-            setupUserUI();
+            btn.innerText = "Verify & Enter Portal";
+
+            if (res.ok) {
+                const data = await res.json();
+                currentUser = { ...pendingUser, is_admin: data.is_admin };
+                localStorage.setItem('n2n_user', JSON.stringify(currentUser));
+                document.getElementById('authModal').classList.add('hidden');
+                setupUserUI();
+            } else {
+                alert("Invalid or Expired Code. Please try again.");
+            }
+        }
+
+        function backToDetails() {
+            document.getElementById('otpForm').classList.add('hidden');
+            document.getElementById('detailsForm').classList.remove('hidden');
+        }
+
+        function logoutUser() {
+            localStorage.removeItem('n2n_user');
+            currentUser = null;
+            pendingUser = null;
+            
+            // Reset UI
+            document.getElementById('userBadge').classList.add('hidden');
+            document.getElementById('adminBtn').classList.add('hidden');
+            document.getElementById('logoutBtn').classList.add('hidden');
+            
+            // Reset forms
+            document.getElementById('detailsForm').reset();
+            document.getElementById('otpForm').reset();
+            backToDetails();
+            
+            // Show modal again
+            document.getElementById('authModal').classList.remove('hidden');
         }
 
         function setupUserUI() {
@@ -343,6 +471,7 @@ async def serve_ui():
             const badge = document.getElementById('userBadge');
             badge.innerText = `${currentUser.name}`;
             badge.classList.remove('hidden');
+            document.getElementById('logoutBtn').classList.remove('hidden');
 
             if (currentUser.is_admin) {
                 document.getElementById('adminBtn').classList.remove('hidden');
